@@ -1,6 +1,22 @@
 import numpy as np
 import tensorflow as tf
 
+# helper class for writing basic C-style code strings
+class _CodeGenerator:
+    # characters for new line
+    new_line = "\n";
+
+    # for loop
+    def for_loop(iteration_string : str, inner_commands : str, start_indent : str, indent_size : str) -> str:
+        code = start_indent + "for (" + iteration_string + ")" + _CodeGenerator.new_line;  # define cycle over input array
+        code = code + start_indent + "{" + _CodeGenerator.new_line;  # define cycle over input array
+
+        # indent inner commands
+        indented_inner_commands = indent_size + inner_commands.replace(_CodeGenerator.new_line, _CodeGenerator.new_line + start_indent + indent_size);
+        code = code + start_indent + indented_inner_commands + _CodeGenerator.new_line; # add indented inner commands
+        code = code + start_indent + "}"  # close the weight loop
+        return code;
+
 # virtual layer class
 class _Layer:
     # get data for the layer
@@ -30,16 +46,14 @@ class _FlattenLayer(_Layer):
             output_len = output_len * s;
 
         # define output variable
-        code = indent + "float " + output + "[" + str(output_len) + "];\n";
+        code = indent + "// flatten layer " + str(self.index) + _CodeGenerator.new_line;
+        code = code + indent + "float " + output + "[" + str(output_len) + "];" + _CodeGenerator.new_line;
 
         # support only for 2D inputs for the flatten
         if len(self._input_shape) == 2:
             # loop over weights
-            code = code + indent + "for (int i = 0; i < " + str(self._input_shape[0]) + "; i++)\n" + indent + "{\n";  # define cycle over input array
-            code = code + indent + indent + "for (int j = 0; j < " + str(self._input_shape[1]) + "; j++)\n" + indent + indent + "{\n";  # define cycle over output
-            code = code + indent + indent + indent + output + "[i * " + str(self._input_shape[0]) + " + j] = " + input + "[i][j];\n"
-            code = code + indent + indent + "}\n"  # close the inner loop
-            code = code + indent + "}\n"  # close the weight loop
+            inner_loop = _CodeGenerator.for_loop("int j = 0; j < " + str(self._input_shape[1]) + "; j++", output + "[i * " + str(self._input_shape[0]) + " + j] = " + input + "[i][j];", "", indent);
+            code = code + _CodeGenerator.for_loop("int i = 0; i < " + str(self._input_shape[0]) + "; i++", inner_loop, indent, indent) + _CodeGenerator.new_line + _CodeGenerator.new_line;
 
         return (code, output);
 
@@ -60,7 +74,7 @@ class _DenseLayer(_Layer):
         self.var = variable_prefix;
 
     def get_data_str(self):
-        weights_data = "static const float " + self.var + "w"+str(self.index)+"["+str(len(self.weights))+"]"+"["+str(len(self.weights[0]))+"] = \n{";
+        weights_data = "static const float " + self.var + "w"+str(self.index)+"["+str(len(self.weights))+"]"+"["+str(len(self.weights[0]))+"] = " + _CodeGenerator.new_line + "{";
         for r in range(len(self.weights)):
             row = self.weights[r];
             weights_data = weights_data + "{";
@@ -71,19 +85,19 @@ class _DenseLayer(_Layer):
                     weights_data = weights_data + ", ";
             weights_data = weights_data + "}";
             if r < len(self.weights) - 1:
-                weights_data = weights_data + ",\n";
-        weights_data = weights_data + "};\n";
-        biases_data = "static const float " + self.var + "b"+str(self.index)+"["+str(len(self.biases))+"] = \n{";
+                weights_data = weights_data + "," + _CodeGenerator.new_line;
+        weights_data = weights_data + "};" + _CodeGenerator.new_line;
+        biases_data = "static const float " + self.var + "b"+str(self.index)+"["+str(len(self.biases))+"] = " + _CodeGenerator.new_line + "{";
         for b in range(len(self.biases)):
             bias = self.biases[b];
             biases_data = biases_data + str(bias);
             if b < len(self.biases) - 1:
-                biases_data = biases_data + ",\n";
-        biases_data = biases_data + "};\n";
-        return weights_data + "\n" + biases_data + "\n"
+                biases_data = biases_data + "," + _CodeGenerator.new_line;
+        biases_data = biases_data + "};" + _CodeGenerator.new_line;
+        return weights_data + _CodeGenerator.new_line + biases_data + _CodeGenerator.new_line
 
     # input = name of the input variable
-    # output = (fucntion code, name of the output variable)
+    # output = (function code, name of the output variable)
     def get_code_str(self, input : str, indent : str) -> (str,str):
         output = "d" + str(self.index);
         weights = self.var + "w" + str(self.index);
@@ -92,24 +106,20 @@ class _DenseLayer(_Layer):
         input_len = len(self.weights);
 
         # define output variable
-        code = indent + "float "+ output + "[" + str(output_len) + "] = {";
+        code = indent + "// dense layer " + str(self.index) + _CodeGenerator.new_line;
+        code = code + indent + "float "+ output + "[" + str(output_len) + "] = {";
         for i in range(output_len):
             code = code + "0.0f";
             if i < output_len - 1:
                 code = code + ", ";
-        code = code + "};\n";
+        code = code + "};" + _CodeGenerator.new_line;
 
         # loop over weights
-        code = code + indent + "for (int i = 0; i < " + str(input_len) + "; i++)\n" + indent + "{\n"; # define cycle over input array
-        code = code + indent + indent + "for (int o = 0; o < " + str(output_len) + "; o++)\n" + indent + indent + "{\n"; # define cycle over output
-        code = code + indent + indent + indent + output + "[o] += " + weights + "[i][o] * " + input + "[i];\n"
-        code = code + indent + indent + "}\n" # close the inner loop
-        code = code + indent + "}\n" # close the weight loop
+        inner_weight_loop = _CodeGenerator.for_loop("int o = 0; o < " + str(output_len) + "; o++", output + "[o] += " + weights + "[i][o] * " + input + "[i];", "", indent);
+        code = code + _CodeGenerator.for_loop("int i = 0; i < " + str(input_len) + "; i++", inner_weight_loop, indent, indent) + _CodeGenerator.new_line;
 
         # loop over biases
-        code = code + indent + "for (int o = 0; o < " + str(output_len) + "; o++)\n" + indent + "{\n";
-        code = code + indent + indent + output + "[o] = " + self.activation + "(" + output + "[o] + " + biases + "[o]);\n"
-        code = code + indent + "}\n\n" # close the biases loop
+        code = code + _CodeGenerator.for_loop("int o = 0; o < " + str(output_len) + "; o++", output + "[o] = " + self.activation + "(" + output + "[o] + " + biases + "[o]);", indent, indent) + _CodeGenerator.new_line + _CodeGenerator.new_line;
 
         return (code, output);
 
@@ -118,20 +128,20 @@ class CodeGenerator:
     format : str = "float";
 
     def __start_macro(self, file):
-        file.write("#ifndef " + self.macro_header + "\n");
-        file.write("#define " + self.macro_header + "\n\n");
+        file.write("#ifndef " + self.macro_header + _CodeGenerator.new_line);
+        file.write("#define " + self.macro_header + _CodeGenerator.new_line + _CodeGenerator.new_line);
 
     def __end_macro(self, file):
-        file.write("\n#endif\n");
+        file.write(_CodeGenerator.new_line + "#endif" + _CodeGenerator.new_line);
 
     def __define_activation_functions(self, file):
-        file.write("#ifndef __NN_ACTIVATIONS__\n");
+        file.write("#ifndef __NN_ACTIVATIONS__" + _CodeGenerator.new_line);
         file.write("#define __NN_ACTIVATIONS__");
-        linear = "\n// linear activation\nfloat linearActivation(float x) { return x; }\n"
-        relu = "\n// relu activation\nfloat reluActivation(float x) { return max(0.0f, x); }\n"
-        sigmoid = "\n// sigmoid activation\nfloat sigmoidActivation(float x) { return 1.0f / (1.0f + exp(-x)); }\n"
+        linear = _CodeGenerator.new_line + "// linear activation" + _CodeGenerator.new_line + "float linearActivation(float x) { return x; }" + _CodeGenerator.new_line
+        relu = _CodeGenerator.new_line + "// relu activation" + _CodeGenerator.new_line + "float reluActivation(float x) { return max(0.0f, x); }" + _CodeGenerator.new_line
+        sigmoid = _CodeGenerator.new_line + "// sigmoid activation" + _CodeGenerator.new_line + "float sigmoidActivation(float x) { return 1.0f / (1.0f + exp(-x)); }" + _CodeGenerator.new_line
         file.write(linear + relu + sigmoid);
-        file.write("#endif\n\n");
+        file.write("#endif" + _CodeGenerator.new_line + _CodeGenerator.new_line);
 
     def __start_function(self, model, file):
         # define network input and output type
@@ -147,10 +157,10 @@ class CodeGenerator:
         function_header = function_header + ", ";
         function_header = function_header + "out "+self.format+" output[" + str(self.output_dimension) + "])";
         # write function header and open body
-        file.write(function_header + "\n{\n");
+        file.write(function_header + _CodeGenerator.new_line + "{" + _CodeGenerator.new_line);
 
     def __end_function(self, file):
-        file.write("\n}\n");
+        file.write(_CodeGenerator.new_line + "}" + _CodeGenerator.new_line);
 
     def __gather_hidden_layers(self, model, variable_prefix : str):
         config = model.get_config();
@@ -218,8 +228,8 @@ class CodeGenerator:
             file.write(code);
 
         # assign the last output to the function output and return
-        output_code = indent + "for (int o = 0; o < " + str(self.output_dimension) + "; o++)\n" + indent + "{\n";
-        output_code = output_code + indent + indent + "output[o] = " + input_var_name + "[o];\n" + indent + "}"
+        output_code = indent + "// output layer" + _CodeGenerator.new_line;
+        output_code = output_code + _CodeGenerator.for_loop("int o = 0; o < " + str(self.output_dimension) + "; o++", "output[o] = " + input_var_name + "[o];", indent, indent);
         file.write(output_code);
 
         # end function body
