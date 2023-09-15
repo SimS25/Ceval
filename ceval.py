@@ -19,8 +19,12 @@ class _CodeGenerator:
 
 # virtual layer class
 class _Layer:
+    # initializing constructor
+    def __init__(self, ceval):
+        self.ceval = ceval;
+
     # get data for the layer
-    def get_data_str(self):
+    def get_embedded_data_str(self):
         return "";
 
     # input = name of the input variable
@@ -31,11 +35,13 @@ class _Layer:
 # flatten layer data
 class _FlattenLayer(_Layer):
     # initializing constructor
-    def __init__(self, layer, layer_index, input_shape):
+    def __init__(self, ceval, layer, layer_index, input_shape):
         # index of the flatten layer
         self.index = layer_index
         # input shape to be flattened
         self._input_shape = input_shape
+        # call layer constructor
+        _Layer.__init__(self, ceval);
 
     # input = name of the input variable
     # output = (fucntion code, name of the output variable)
@@ -60,7 +66,7 @@ class _FlattenLayer(_Layer):
 # dense layer data
 class _DenseLayer(_Layer):
     # initializing constructor
-    def __init__(self, embedded, layer, layer_index, variable_prefix : str, activation : str):
+    def __init__(self, ceval, layer, layer_index, variable_prefix : str, activation : str):
         layer_data = layer.get_weights()
         # index of the hidden layer
         self.index = layer_index
@@ -72,10 +78,10 @@ class _DenseLayer(_Layer):
         self.activation = activation + "Activation";
         # prefix name of each variable
         self.var = variable_prefix;
-        # embedded layer check
-        self.embedded = embedded;
+        # call layer constructor
+        _Layer.__init__(self, ceval);
 
-    def get_data_str(self):
+    def get_embedded_data_str(self):
         weights_data = "static const float " + self.var + "w"+str(self.index)+"["+str(len(self.weights))+"]"+"["+str(len(self.weights[0]))+"] = " + _CodeGenerator.new_line + "{";
         for r in range(len(self.weights)):
             row = self.weights[r];
@@ -101,7 +107,7 @@ class _DenseLayer(_Layer):
     # input = x,y position in the weight data
     # output = str of the code loading the data into the position
     def _load_weight(self, x : str, y : str) -> str:
-        if self.embedded:
+        if self.ceval.embedded:
             weight = self.var + "w" + str(self.index);
             return weight + "[" + x + "][" + y + "]";
         else:
@@ -110,7 +116,7 @@ class _DenseLayer(_Layer):
     # input = x position in the bias data
     # output = str of the code loading the data into the position
     def _load_bias(self, x: str) -> str:
-        if self.embedded:
+        if self.ceval.embedded:
             bias = self.var + "b" + str(self.index);
             return bias + "[" + x + "]";
         else:
@@ -183,16 +189,20 @@ class Ceval:
 
     def __gather_hidden_layers(self, model, variable_prefix : str):
         config = model.get_config();
+        flatten_index = 0;
+        dense_index = 0;
         for l in range(len(model.layers)):
             layer = model.layers[l];
             layer_class = config["layers"][l + 1]["class_name"]
             if layer_class == "Dense":
                 activation = config["layers"][l + 1]["config"].get("activation")
-                self.layers.append(_DenseLayer(self.embedded, layer, l, variable_prefix, activation));
+                self.layers.append(_DenseLayer(self, layer, dense_index, variable_prefix, activation));
+                dense_index = dense_index + 1;
             elif layer_class == "Flatten":
                 if config["layers"][l]["class_name"] == "InputLayer":
                     input_shape = config["layers"][l]["config"]["batch_input_shape"][1:];
-                    self.layers.append(_FlattenLayer(layer, l, input_shape));
+                    self.layers.append(_FlattenLayer(self, layer, flatten_index, input_shape));
+                    flatten_index = flatten_index + 1;
                 else:
                     print("Flatten on non-InputLayer not supported");
             elif layer_class == "Dropout":
@@ -201,7 +211,12 @@ class Ceval:
     def __generate_embedded_data(self, file):
         for layer in self.layers:
             # write data of the layer
-            file.write(layer.get_data_str());
+            file.write(layer.get_embedded_data_str());
+
+    def __generate_data(self, file):
+        # all dense layers have a single texture they read out from
+        # generate the texture header from the network name
+        file.write(self.function_name + "_data")
 
     # initializing constructor
     def __init__(self, output, output_folder, lang, embedded):
@@ -234,9 +249,11 @@ class Ceval:
         # write the output code
         self.__define_activation_functions(file);
 
-        # define embedded data structures for the network
+        # define data structures for the network
         if self.embedded:
-            self.__generate_embedded_data(file);
+            self.__generate_embedded_data(file); # embed all data directly into the header
+        else:
+            self.__generate_data(file); # define source texture to be used for data
 
         # start function
         self.__start_function(model, file);
