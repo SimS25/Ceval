@@ -1,5 +1,7 @@
 import numpy as np
 import tensorflow as tf
+import numpy as np
+import math
 
 # helper class for writing basic C-style code strings
 class _CodeGenerator:
@@ -28,7 +30,7 @@ class _Layer:
         return "";
 
     # input = name of the input variable
-    # output = (fucntion code, name of the output variable)
+    # output = (function code, name of the output variable)
     def get_code_str(self, input : str, indent : str) -> (str,str):
         return ("",input);
 
@@ -65,6 +67,17 @@ class _FlattenLayer(_Layer):
 
 # dense layer data
 class _DenseLayer(_Layer):
+    ## Dense Layer data format:
+    #           X
+    #     ____________
+    #     |           |
+    # Y   |     W     |
+    #     |___________|
+    # Y+1 |____ B ____|
+    #   X = dense layer OUTPUT dimension
+    #   Y = dense layer INPUT dimension (usually output from the previous layer)
+    #   B = Y+1 is bias row
+
     # initializing constructor
     def __init__(self, ceval, layer, layer_index, variable_prefix : str, activation : str):
         layer_data = layer.get_weights()
@@ -81,7 +94,7 @@ class _DenseLayer(_Layer):
         # call layer constructor
         _Layer.__init__(self, ceval);
 
-    def get_embedded_data_str(self):
+    def get_embedded_data_str(self) -> str:
         weights_data = "static const float " + self.var + "w"+str(self.index)+"["+str(len(self.weights))+"]"+"["+str(len(self.weights[0]))+"] = " + _CodeGenerator.new_line + "{";
         for r in range(len(self.weights)):
             row = self.weights[r];
@@ -104,27 +117,59 @@ class _DenseLayer(_Layer):
         biases_data = biases_data + "};" + _CodeGenerator.new_line;
         return weights_data + _CodeGenerator.new_line + biases_data + _CodeGenerator.new_line
 
+    # write output binary data, fill blank unused space with zeros
+    def write_data_binary(self, file, xDim : int, yDim : int):
+        # prepare data array and fill the blanks
+        float_data = [];
+        xMax, yMax = self.get_dimensions();
+        for y in range(yDim):
+            if y < yMax: # weight data row
+                for x in range(xDim):
+                    row = [];
+                    if x < xMax: # data collumn
+                        row.append(self.weights[y][x]);
+                    else: # blank collumn
+                        row.append(0.0);
+            elif y == yMax: # bias data row
+                for x in range(xDim):
+                    row = [];
+                    if x < xMax: # data collumn
+                        row.append(self.biases[x]);
+                    else: # blank collumn
+                        row.append(0.0);
+            else: # blank row
+                blank_row = [0.0] * xDim;
+                float_data.append(blank_row);
+
+        a = np.array(float_data, 'float32')
+        a.tofile(file)
+
+    # return dimensions of the layer
+    def get_dimensions(self) ->(int, int):
+        return (len(self.weights[0]), len(self.weights));
+
     # returns data index into the dense layer data texture
     def _get_data_index(self, x : str, y : str) -> str:
-        return "int3(" + y + ", " + x + ", " + str(self.index) + ")";
+        return "int3(" + x + ", " + y + ", " + str(self.index) + ")";
 
     # input = x,y position in the weight data
     # output = str of the code loading the data into the position
     def _load_weight(self, x : str, y : str) -> str:
         if self.ceval.embedded:
             weight = self.var + "w" + str(self.index);
-            return weight + "[" + x + "][" + y + "]";
+            return weight + "[" + y + "][" + x + "]"; # embedded data are sorted in transpose for better memory access
         else:
             return self.ceval.dense_data_name + ".Load(" + self._get_data_index(x, y) + ")";
 
     # input = x position in the bias data
     # output = str of the code loading the data into the position
-    def _load_bias(self, y: str) -> str:
+    def _load_bias(self, x: str) -> str:
         if self.ceval.embedded:
             bias = self.var + "b" + str(self.index);
-            return bias + "[" + y + "]";
+            return bias + "[" + x + "]";
         else:
-            return self.ceval.dense_data_name + ".Load(" + self._get_data_index(str(len(self.weights)), y) + ")";
+            xDim, yDim = self.get_dimensions();
+            return self.ceval.dense_data_name + ".Load(" + self._get_data_index(x, str(yDim)) + ")";
 
     # input = name of the input variable
     # output = (function code, name of the output variable)
@@ -144,7 +189,7 @@ class _DenseLayer(_Layer):
         code = code + "};" + _CodeGenerator.new_line;
 
         # loop over weights
-        inner_weight_loop = _CodeGenerator.for_loop("int o = 0; o < " + str(output_len) + "; o++", output + "[o] += " + self._load_weight("i","o") + " * " + input + "[i];", "", indent);
+        inner_weight_loop = _CodeGenerator.for_loop("int o = 0; o < " + str(output_len) + "; o++", output + "[o] += " + self._load_weight("o", "i") + " * " + input + "[i];", "", indent);
         code = code + _CodeGenerator.for_loop("int i = 0; i < " + str(input_len) + "; i++", inner_weight_loop, indent, indent) + _CodeGenerator.new_line;
 
         # loop over biases
@@ -201,6 +246,7 @@ class Ceval:
             if layer_class == "Dense":
                 activation = config["layers"][l + 1]["config"].get("activation")
                 self.layers.append(_DenseLayer(self, layer, dense_index, variable_prefix, activation));
+                self.dense_layers.append(self.layers[-1]); # save dense layer for further data processing
                 dense_index = dense_index + 1;
             elif layer_class == "Flatten":
                 if config["layers"][l]["class_name"] == "InputLayer":
@@ -218,10 +264,46 @@ class Ceval:
             # write data of the layer
             file.write(layer.get_embedded_data_str());
 
-    # generate dense data texture slots
+    # generate binary data for the dense layers of the network
+    # returns dimension of the texture
+    def __generate_binary_dense_data(self) ->(int, int, int):
+        dense_data_file = open(self.dense_data_output_path, "wb");  # write bytes, always override previous content
+        # compute size of the dense data textures
+        xDim = 0;
+        yDim = 0;
+        zDim = len(self.dense_layers);
+        for dense in self.dense_layers:
+            x, y = dense.get_dimensions();
+            y = y + 1; # y dimension in data will store additional row for bias
+            xDim = max(x, xDim);
+            yDim = max(y, yDim);
+
+        # ceil x,y dimensions to the nearest power of two
+        # don't ceil z dimension as that contains just slices for individual layers
+        powerX = math.log(xDim) / math.log(2.0);
+        powerY = math.log(yDim) / math.log(2.0);
+        xDim = int(math.pow(2.0, math.ceil(powerX)));
+        yDim = int(math.pow(2.0, math.ceil(powerY)));
+
+        # write all layers in serial, filling up unused data space in between
+        for dense in self.dense_layers:
+            dense.write_data_binary(dense_data_file, xDim, yDim);
+
+        dense_data_file.close();
+
+        return (xDim, yDim, zDim);
+
+    # generate data of the network
     def __generate_data(self, file):
+        # generate the binary data into separate files
+        xDense, yDense, zDense = self.__generate_binary_dense_data();
+
         # prepare texture bind spots for user
-        data_bind_definition = "// TODO: assign binding spots for the network data" + _CodeGenerator.new_line;
+        data_bind_definition = "// #TODO:" + _CodeGenerator.new_line;
+        data_bind_definition = data_bind_definition + "//      1. Assign binding slots for the network data" + _CodeGenerator.new_line;
+        data_bind_definition = data_bind_definition + "//      2. Load textures with their dimensions and bind them to their slots:" + _CodeGenerator.new_line;
+        data_bind_definition = data_bind_definition + "//              a. Load " + self.dense_data_name + " as Texture2DArray with dimensions [" + str(xDense) + "][" + str(yDense) + "][" + str(zDense) + "] and format float32" + _CodeGenerator.new_line;
+        data_bind_definition = data_bind_definition + "//      3. Call function " + self.function_name + " to predict." + _CodeGenerator.new_line;
         data_bind_definition = data_bind_definition + "Texture2DArray<float> " + self.dense_data_name + " : register(t" + "118" + ");" + _CodeGenerator.new_line;
         file.write(data_bind_definition + _CodeGenerator.new_line);
 
@@ -238,10 +320,14 @@ class Ceval:
         self.function_name = output;
         # dense layers structure name
         self.dense_data_name = self.function_name + "_dense_data";
+        # dense data file output
+        self.dense_data_output_path = output_folder + "/" + self.dense_data_name;
         # macro header
         self.macro_header = "__" + output.upper() + "__"
-        # list for hidden layers
+        # list for all hidden layers
         self.layers = [];
+        # list for Dense layers
+        self.dense_layers = [];
         # generate data as embedded into the header
         self.embedded = embedded;
 
