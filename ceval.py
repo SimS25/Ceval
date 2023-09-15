@@ -60,7 +60,7 @@ class _FlattenLayer(_Layer):
 # dense layer data
 class _DenseLayer(_Layer):
     # initializing constructor
-    def __init__(self, layer, layer_index, variable_prefix : str, activation : str):
+    def __init__(self, embedded, layer, layer_index, variable_prefix : str, activation : str):
         layer_data = layer.get_weights()
         # index of the hidden layer
         self.index = layer_index
@@ -72,6 +72,8 @@ class _DenseLayer(_Layer):
         self.activation = activation + "Activation";
         # prefix name of each variable
         self.var = variable_prefix;
+        # embedded layer check
+        self.embedded = embedded;
 
     def get_data_str(self):
         weights_data = "static const float " + self.var + "w"+str(self.index)+"["+str(len(self.weights))+"]"+"["+str(len(self.weights[0]))+"] = " + _CodeGenerator.new_line + "{";
@@ -96,11 +98,28 @@ class _DenseLayer(_Layer):
         biases_data = biases_data + "};" + _CodeGenerator.new_line;
         return weights_data + _CodeGenerator.new_line + biases_data + _CodeGenerator.new_line
 
+    # input = x,y position in the weight data
+    # output = str of the code loading the data into the position
+    def _load_weight(self, x : str, y : str) -> str:
+        if self.embedded:
+            weight = self.var + "w" + str(self.index);
+            return weight + "[" + x + "][" + y + "]";
+        else:
+            return "_load_weight !- NOT IMPLEMENTED";
+
+    # input = x position in the bias data
+    # output = str of the code loading the data into the position
+    def _load_bias(self, x: str) -> str:
+        if self.embedded:
+            bias = self.var + "b" + str(self.index);
+            return bias + "[" + x + "]";
+        else:
+            return "_load_bias !- NOT IMPLEMENTED";
+
     # input = name of the input variable
     # output = (function code, name of the output variable)
     def get_code_str(self, input : str, indent : str) -> (str,str):
         output = "d" + str(self.index);
-        weights = self.var + "w" + str(self.index);
         biases = self.var + "b" + str(self.index);
         output_len = len(self.biases);
         input_len = len(self.weights);
@@ -115,11 +134,11 @@ class _DenseLayer(_Layer):
         code = code + "};" + _CodeGenerator.new_line;
 
         # loop over weights
-        inner_weight_loop = _CodeGenerator.for_loop("int o = 0; o < " + str(output_len) + "; o++", output + "[o] += " + weights + "[i][o] * " + input + "[i];", "", indent);
+        inner_weight_loop = _CodeGenerator.for_loop("int o = 0; o < " + str(output_len) + "; o++", output + "[o] += " + self._load_weight("i","o") + " * " + input + "[i];", "", indent);
         code = code + _CodeGenerator.for_loop("int i = 0; i < " + str(input_len) + "; i++", inner_weight_loop, indent, indent) + _CodeGenerator.new_line;
 
         # loop over biases
-        code = code + _CodeGenerator.for_loop("int o = 0; o < " + str(output_len) + "; o++", output + "[o] = " + self.activation + "(" + output + "[o] + " + biases + "[o]);", indent, indent) + _CodeGenerator.new_line + _CodeGenerator.new_line;
+        code = code + _CodeGenerator.for_loop("int o = 0; o < " + str(output_len) + "; o++", output + "[o] = " + self.activation + "(" + output + "[o] + " + self._load_bias("o") + ");", indent, indent) + _CodeGenerator.new_line + _CodeGenerator.new_line;
 
         return (code, output);
 
@@ -169,7 +188,7 @@ class Ceval:
             layer_class = config["layers"][l + 1]["class_name"]
             if layer_class == "Dense":
                 activation = config["layers"][l + 1]["config"].get("activation")
-                self.layers.append(_DenseLayer(layer, l, variable_prefix, activation));
+                self.layers.append(_DenseLayer(self.embedded, layer, l, variable_prefix, activation));
             elif layer_class == "Flatten":
                 if config["layers"][l]["class_name"] == "InputLayer":
                     input_shape = config["layers"][l]["config"]["batch_input_shape"][1:];
