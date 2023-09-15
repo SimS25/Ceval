@@ -104,6 +104,10 @@ class _DenseLayer(_Layer):
         biases_data = biases_data + "};" + _CodeGenerator.new_line;
         return weights_data + _CodeGenerator.new_line + biases_data + _CodeGenerator.new_line
 
+    # returns data index into the dense layer data texture
+    def _get_data_index(self, x : str, y : str) -> str:
+        return "int3(" + y + ", " + x + ", " + str(self.index) + ")";
+
     # input = x,y position in the weight data
     # output = str of the code loading the data into the position
     def _load_weight(self, x : str, y : str) -> str:
@@ -111,16 +115,16 @@ class _DenseLayer(_Layer):
             weight = self.var + "w" + str(self.index);
             return weight + "[" + x + "][" + y + "]";
         else:
-            return "_load_weight !- NOT IMPLEMENTED";
+            return self.ceval.dense_data_name + ".Load(" + self._get_data_index(x, y) + ")";
 
     # input = x position in the bias data
     # output = str of the code loading the data into the position
-    def _load_bias(self, x: str) -> str:
+    def _load_bias(self, y: str) -> str:
         if self.ceval.embedded:
             bias = self.var + "b" + str(self.index);
-            return bias + "[" + x + "]";
+            return bias + "[" + y + "]";
         else:
-            return "_load_bias !- NOT IMPLEMENTED";
+            return self.ceval.dense_data_name + ".Load(" + self._get_data_index(str(len(self.weights)), y) + ")";
 
     # input = name of the input variable
     # output = (function code, name of the output variable)
@@ -208,15 +212,18 @@ class Ceval:
             elif layer_class == "Dropout":
                 continue
 
+    # generate data embedded into the header file
     def __generate_embedded_data(self, file):
         for layer in self.layers:
             # write data of the layer
             file.write(layer.get_embedded_data_str());
 
+    # generate dense data texture slots
     def __generate_data(self, file):
-        # all dense layers have a single texture they read out from
-        # generate the texture header from the network name
-        file.write(self.function_name + "_data")
+        # prepare texture bind spots for user
+        data_bind_definition = "// TODO: assign binding spots for the network data" + _CodeGenerator.new_line;
+        data_bind_definition = data_bind_definition + "Texture2DArray<float> " + self.dense_data_name + " : register(t" + "118" + ");" + _CodeGenerator.new_line;
+        file.write(data_bind_definition + _CodeGenerator.new_line);
 
     # initializing constructor
     def __init__(self, output, output_folder, lang, embedded):
@@ -229,6 +236,8 @@ class Ceval:
         self.output_path = output_folder + "/" + output + suffix;
         # function name
         self.function_name = output;
+        # dense layers structure name
+        self.dense_data_name = self.function_name + "_dense_data";
         # macro header
         self.macro_header = "__" + output.upper() + "__"
         # list for hidden layers
@@ -246,14 +255,14 @@ class Ceval:
         # start by defining the macro
         self.__start_macro(file);
 
-        # write the output code
-        self.__define_activation_functions(file);
-
         # define data structures for the network
         if self.embedded:
             self.__generate_embedded_data(file); # embed all data directly into the header
         else:
             self.__generate_data(file); # define source texture to be used for data
+
+        # write the output code
+        self.__define_activation_functions(file);
 
         # start function
         self.__start_function(model, file);
