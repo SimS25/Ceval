@@ -123,7 +123,7 @@ class _DenseLayer(_Layer):
 
         return (code, output);
 
-class CodeGenerator:
+class Ceval:
     # network format
     format : str = "float";
 
@@ -185,7 +185,7 @@ class CodeGenerator:
             file.write(layer.get_data_str());
 
     # initializing constructor
-    def __init__(self, output, output_folder, lang):
+    def __init__(self, output, output_folder, lang, embedded):
         if lang == 'hlsl':
             suffix = ".h";
         else:
@@ -199,6 +199,8 @@ class CodeGenerator:
         self.macro_header = "__" + output.upper() + "__"
         # list for hidden layers
         self.layers = [];
+        # generate data as embedded into the header
+        self.embedded = embedded;
 
     def generate(self, model : tf.keras.Model):
         # collect hidden layer data
@@ -214,7 +216,8 @@ class CodeGenerator:
         self.__define_activation_functions(file);
 
         # define embedded data structures for the network
-        self.__generate_embedded_data(file);
+        if self.embedded:
+            self.__generate_embedded_data(file);
 
         # start function
         self.__start_function(model, file);
