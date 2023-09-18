@@ -2,6 +2,8 @@ import numpy as np
 import tensorflow as tf
 import numpy as np
 import math
+import rectpack
+from rectpack import newPacker
 
 # helper class for writing basic C-style code strings
 class _CodeGenerator:
@@ -118,41 +120,41 @@ class _DenseLayer(_Layer):
         return weights_data + _CodeGenerator.new_line + biases_data + _CodeGenerator.new_line
 
     # write output binary data, fill blank unused space with zeros
-    def write_data_binary(self, file, xDim : int, yDim : int):
-        # prepare data array and fill the blanks
-        float_data = [];
-        xMax, yMax = self.get_dimensions();
-        for y in range(yDim):
-            if y < yMax: # weight data row
-                row = [];
-                for x in range(xDim):
-                    if x < xMax: # data collumn
-                        row.append(self.weights[y][x]);
-                    else: # blank collumn
-                        row.append(0.0);
-                float_data.append(row);
-            elif y == yMax: # bias data row
-                row = [];
-                for x in range(xDim):
-                    if x < xMax: # data collumn
-                        row.append(self.biases[x]);
-                    else: # blank collumn
-                        row.append(0.0);
-                float_data.append(row);
-            else: # blank row
-                blank_row = [0.0] * xDim;
-                float_data.append(blank_row);
+    def write_data_binary(self, data, xCoord, yCoord):
+        # save coordinates of the data for loading
+        self.data_coordinates = (xCoord, yCoord);
+        xDim, yDim = self.get_dimensions();
 
-        a = np.array(float_data, 'float32')
-        a.tofile(file)
+        # write weights
+        for y in range(yDim):
+            for x in range(xDim):
+                data[yCoord + y][xCoord + x] = self.weights[y][x];
+        # write biases
+        for x in range(xDim):
+            data[yCoord + yDim][xCoord + x] = self.biases[x];
 
     # return dimensions of the layer
     def get_dimensions(self) ->(int, int):
         return (len(self.weights[0]), len(self.weights));
 
+    # return required memory space for this dense layer
+    def get_memory(self):
+        x,y = self.get_dimensions();
+        return (x, y + 1); # y dimension in data will store additional row for bias
+
+    # layer index
+    def get_layer_index(self):
+        return self.index;
+
     # returns data index into the dense layer data texture
     def _get_data_index(self, x : str, y : str) -> str:
-        return "int4(" + x + ", " + y + ", " + str(self.index) + ", 0)";
+        xOffset = "";
+        if self.data_coordinates[0] > 0:
+            xOffset = str(self.data_coordinates[0]) + " + ";
+        yOffset = "";
+        if self.data_coordinates[1] > 0:
+            yOffset = str(self.data_coordinates[1]) + " + ";
+        return "int3(" + xOffset + x + ", " + yOffset  + y + ", 0)";
 
     # input = x,y position in the weight data
     # output = str of the code loading the data into the position
@@ -270,45 +272,113 @@ class Ceval:
 
     # generate binary data for the dense layers of the network
     # returns dimension of the texture
-    def __generate_binary_dense_data(self) ->(int, int, int):
-        dense_data_file = open(self.dense_data_output_path, "wb");  # write bytes, always override previous content
-        # compute size of the dense data textures
-        xDim = 0;
-        yDim = 0;
-        zDim = len(self.dense_layers);
-        for dense in self.dense_layers:
-            x, y = dense.get_dimensions();
-            y = y + 1; # y dimension in data will store additional row for bias
-            xDim = max(x, xDim);
-            yDim = max(y, yDim);
+    def __generate_binary_dense_data(self) ->(int, int):
+        # sort layers by their dense layer size
+        def _denseComparator(d):
+            x,y = d.get_memory();
+            return x * y;
+        self.dense_layers.sort(reverse=True, key=_denseComparator);
 
-        # ceil x,y dimensions to the nearest power of two
-        # don't ceil z dimension as that contains just slices for individual layers
-        powerX = math.log(xDim) / math.log(2.0);
-        powerY = math.log(yDim) / math.log(2.0);
-        xDim = int(math.pow(2.0, math.ceil(powerX)));
-        yDim = int(math.pow(2.0, math.ceil(powerY)));
+        # start with the dimensions of the largest layer
+        xSize, ySize = self.dense_layers[0].get_memory();
+
+        # ceil them up to power of two
+        powerX = math.log(xSize) / math.log(2.0);
+        powerY = math.log(ySize) / math.log(2.0);
+        xSize = int(math.pow(2.0, math.ceil(powerX)));
+        ySize = int(math.pow(2.0, math.ceil(powerY)));
+
+        # now try to fit blocks into the space, and increase size otherwise
+        rectangles = [];
+        for dense in self.dense_layers:
+            x,y  = dense.get_memory();
+            rectangles.append((x, y, dense.get_layer_index()));
+
+        def _pack_rectangles(self, rectangles, x, y):
+            packer = newPacker(rotation=False);
+            # Add the rectangles to packing queue
+            for r in rectangles:
+                packer.add_rect(*r)
+
+            # Add the bins where the rectangles will be placed
+            bins = [(x,y)]
+            packer.add_bin(*bins[0]);
+            # Start packing
+            packer.pack()
+            # Obtain number of bins used for packing
+            nbins = len(packer);
+
+            if nbins == 1:
+                if (len(packer[0]) < len(self.dense_layers)): # not all rectanges fit into the bin
+                    return None
+                else:
+                    return packer;
+            else:
+                return None;
+
+        final_packer = None;
+        while True:
+            # try to pack to the current size
+            packer = _pack_rectangles(self, rectangles, xSize, ySize);
+            if packer is not None:
+                final_packer = packer;
+                break;
+
+            # try to enlarge just the xSize
+            packer = _pack_rectangles(self, rectangles, 2 * xSize, ySize);
+            if packer is not None:
+                final_packer = packer;
+                break;
+
+            # try to enlarge just the ySize
+            packer = _pack_rectangles(self, rectangles, xSize, 2 * ySize);
+            if packer is not None:
+                final_packer = packer;
+                break;
+
+            # enlarge both and try again
+            xSize = 2 * xSize;
+            ySize = 2 * ySize;
+
+        # final canvas size for the whole dense data
+        xSize = final_packer.bin_list()[0][0];
+        ySize = final_packer.bin_list()[0][1];
+
+        # create empty canvas of the size result from the 2D packing
+        data = [[0 for col in range(xSize)] for row in range(ySize)]
 
         # write all layers in serial, filling up unused data space in between
         for dense in self.dense_layers:
-            dense.write_data_binary(dense_data_file, xDim, yDim);
+            # find coordinates of the rectangle in the packer
+            xCoord, yCoord = (0, 0);
+            for rect in final_packer[0]:
+                if rect.rid == dense.get_layer_index():
+                    xCoord = rect.x;
+                    yCoord = rect.y;
+                    break;
+            # write data into the block
+            dense.write_data_binary(data, xCoord, yCoord);
 
+        # write data to the file
+        dense_data_file = open(self.dense_data_output_path, "wb");  # write bytes, always override previous content
+        np_float_data = np.array(data, 'float32');
+        np_float_data.tofile(dense_data_file);
         dense_data_file.close();
 
-        return (xDim, yDim, zDim);
+        return (xSize, ySize);
 
     # generate data of the network
     def __generate_data(self, file):
         # generate the binary data into separate files
-        xDense, yDense, zDense = self.__generate_binary_dense_data();
+        xDense, yDense = self.__generate_binary_dense_data();
 
         # prepare texture bind spots for user
         data_bind_definition = "// #TODO:" + _CodeGenerator.new_line;
         data_bind_definition = data_bind_definition + "//      1. Assign binding slots for the network data" + _CodeGenerator.new_line;
         data_bind_definition = data_bind_definition + "//      2. Load textures with their dimensions and bind them to their slots:" + _CodeGenerator.new_line;
-        data_bind_definition = data_bind_definition + "//              a. Load " + self.dense_data_name + " as Texture2DArray with dimensions [" + str(xDense) + "][" + str(yDense) + "][" + str(zDense) + "] and format float32" + _CodeGenerator.new_line;
+        data_bind_definition = data_bind_definition + "//              a. Load " + self.dense_data_name + " as Texture2D with dimensions [" + str(xDense) + "][" + str(yDense) + "] and format float32" + _CodeGenerator.new_line;
         data_bind_definition = data_bind_definition + "//      3. Call function " + self.function_name + " to predict." + _CodeGenerator.new_line;
-        data_bind_definition = data_bind_definition + "Texture2DArray<float> " + self.dense_data_name + " : register(t" + "100" + ");" + _CodeGenerator.new_line;
+        data_bind_definition = data_bind_definition + "Texture2D<float> " + self.dense_data_name + " : register(t" + "100" + ");" + _CodeGenerator.new_line;
         file.write(data_bind_definition + _CodeGenerator.new_line);
 
     # initializing constructor
