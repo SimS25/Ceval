@@ -124,19 +124,21 @@ class _DenseLayer(_Layer):
         xMax, yMax = self.get_dimensions();
         for y in range(yDim):
             if y < yMax: # weight data row
+                row = [];
                 for x in range(xDim):
-                    row = [];
                     if x < xMax: # data collumn
                         row.append(self.weights[y][x]);
                     else: # blank collumn
                         row.append(0.0);
+                float_data.append(row);
             elif y == yMax: # bias data row
+                row = [];
                 for x in range(xDim):
-                    row = [];
                     if x < xMax: # data collumn
                         row.append(self.biases[x]);
                     else: # blank collumn
                         row.append(0.0);
+                float_data.append(row);
             else: # blank row
                 blank_row = [0.0] * xDim;
                 float_data.append(blank_row);
@@ -150,7 +152,7 @@ class _DenseLayer(_Layer):
 
     # returns data index into the dense layer data texture
     def _get_data_index(self, x : str, y : str) -> str:
-        return "int3(" + x + ", " + y + ", " + str(self.index) + ")";
+        return "int4(" + x + ", " + y + ", " + str(self.index) + ", 0)";
 
     # input = x,y position in the weight data
     # output = str of the code loading the data into the position
@@ -222,7 +224,9 @@ class Ceval:
         config = model.get_config();
         self.input_dimension = config["layers"][0]["config"]["batch_input_shape"][1:];  # first dimension is empty
         self.output_dimension = config["layers"][-1]["config"]["units"];
-        function_header = "void " + self.function_name + "(";
+
+        function_header = "// prediction function" + _CodeGenerator.new_line;
+        function_header = function_header + "void " + self.function_name + "(";
         # add input and output parameters
         function_header = function_header + "in "+self.format+" input";
         for d in range(len(self.input_dimension)):
@@ -304,7 +308,7 @@ class Ceval:
         data_bind_definition = data_bind_definition + "//      2. Load textures with their dimensions and bind them to their slots:" + _CodeGenerator.new_line;
         data_bind_definition = data_bind_definition + "//              a. Load " + self.dense_data_name + " as Texture2DArray with dimensions [" + str(xDense) + "][" + str(yDense) + "][" + str(zDense) + "] and format float32" + _CodeGenerator.new_line;
         data_bind_definition = data_bind_definition + "//      3. Call function " + self.function_name + " to predict." + _CodeGenerator.new_line;
-        data_bind_definition = data_bind_definition + "Texture2DArray<float> " + self.dense_data_name + " : register(t" + "118" + ");" + _CodeGenerator.new_line;
+        data_bind_definition = data_bind_definition + "Texture2DArray<float> " + self.dense_data_name + " : register(t" + "100" + ");" + _CodeGenerator.new_line;
         file.write(data_bind_definition + _CodeGenerator.new_line);
 
     # initializing constructor
