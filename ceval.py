@@ -119,10 +119,13 @@ class _DenseLayer(_Layer):
         biases_data = biases_data + "};" + _CodeGenerator.new_line;
         return weights_data + _CodeGenerator.new_line + biases_data + _CodeGenerator.new_line
 
-    # write output binary data, fill blank unused space with zeros
-    def write_data_binary(self, data, xCoord, yCoord):
-        # save coordinates of the data for loading
+    # save coordinates of the data for loading and binarization
+    def set_data_coordinates(self, xCoord, yCoord):
         self.data_coordinates = (xCoord, yCoord);
+
+    # write output binary data into the prepared coordinates
+    def write_data_binary(self, data):
+        xCoord, yCoord = self.data_coordinates
         xDim, yDim = self.get_dimensions();
 
         # write weights
@@ -201,6 +204,97 @@ class _DenseLayer(_Layer):
 
         return (code, output);
 
+# helper class for packing layer data
+class _DataPacker:
+    # pack rectangles into the canvas, returns None if canvas is too small
+    def _pack_rectangles(rectangles, x, y, num_layers):
+        packer = newPacker(rotation=False);
+        # Add the rectangles to packing queue
+        for r in rectangles:
+            packer.add_rect(*r)
+
+        # Add the bins where the rectangles will be placed
+        bins = [(x, y)]
+        packer.add_bin(*bins[0]);
+        # Start packing
+        packer.pack()
+        # Obtain number of bins used for packing
+        nbins = len(packer);
+
+        if nbins == 1:
+            if (len(packer[0]) < num_layers):  # not all rectanges fit into the bin
+                return None
+            else:
+                return packer;
+        else:
+            return None;
+
+    # dense layer comparator to sort layers from the largest to the smallest
+    def _denseComparator(d):
+        x, y = d.get_memory();
+        return x * y;
+
+    # pack layers by preparing their data index into common data canvas
+    # data canvas resolution is returned on the output
+    def pack_layers_data(dense_layers) ->(int, int):
+        # sort layers by their dense layer size
+        dense_layers.sort(reverse=True, key=_DataPacker._denseComparator);
+
+        # start with the dimensions of the largest layer
+        xSize, ySize = dense_layers[0].get_memory();
+
+        # ceil them up to power of two
+        powerX = math.log(xSize) / math.log(2.0);
+        powerY = math.log(ySize) / math.log(2.0);
+        xSize = int(math.pow(2.0, math.ceil(powerX)));
+        ySize = int(math.pow(2.0, math.ceil(powerY)));
+
+        # now try to fit blocks into the space, and increase size otherwise
+        rectangles = [];
+        for dense in dense_layers:
+            x, y = dense.get_memory();
+            rectangles.append((x, y, dense.get_layer_index()));
+
+        final_packer = None;
+        while True:
+            # try to pack to the current size
+            packer = _DataPacker._pack_rectangles(rectangles, xSize, ySize, len(dense_layers));
+            if packer is not None:
+                final_packer = packer;
+                break;
+
+            # try to enlarge just the xSize
+            packer = _DataPacker._pack_rectangles(rectangles, 2 * xSize, ySize, len(dense_layers));
+            if packer is not None:
+                final_packer = packer;
+                break;
+
+            # try to enlarge just the ySize
+            packer = _DataPacker._pack_rectangles(rectangles, xSize, 2 * ySize, len(dense_layers));
+            if packer is not None:
+                final_packer = packer;
+                break;
+
+            # enlarge both and try again
+            xSize = 2 * xSize;
+            ySize = 2 * ySize;
+
+        # propagate data coordinates to the dense layers
+        for dense in dense_layers:
+            # find coordinates of the rectangle in the packer
+            xCoord, yCoord = (0, 0);
+            for rect in final_packer[0]:
+                if rect.rid == dense.get_layer_index():
+                    xCoord = rect.x;
+                    yCoord = rect.y;
+                    break;
+            dense.set_data_coordinates(xCoord, yCoord);
+
+        # final canvas size for the whole dense data
+        xSize = final_packer.bin_list()[0][0];
+        ySize = final_packer.bin_list()[0][1];
+        return (xSize, ySize);
+
 class Ceval:
     # network format
     format : str = "float";
@@ -273,91 +367,16 @@ class Ceval:
     # generate binary data for the dense layers of the network
     # returns dimension of the texture
     def __generate_binary_dense_data(self) ->(int, int):
-        # sort layers by their dense layer size
-        def _denseComparator(d):
-            x,y = d.get_memory();
-            return x * y;
-        self.dense_layers.sort(reverse=True, key=_denseComparator);
-
-        # start with the dimensions of the largest layer
-        xSize, ySize = self.dense_layers[0].get_memory();
-
-        # ceil them up to power of two
-        powerX = math.log(xSize) / math.log(2.0);
-        powerY = math.log(ySize) / math.log(2.0);
-        xSize = int(math.pow(2.0, math.ceil(powerX)));
-        ySize = int(math.pow(2.0, math.ceil(powerY)));
-
-        # now try to fit blocks into the space, and increase size otherwise
-        rectangles = [];
-        for dense in self.dense_layers:
-            x,y  = dense.get_memory();
-            rectangles.append((x, y, dense.get_layer_index()));
-
-        def _pack_rectangles(self, rectangles, x, y):
-            packer = newPacker(rotation=False);
-            # Add the rectangles to packing queue
-            for r in rectangles:
-                packer.add_rect(*r)
-
-            # Add the bins where the rectangles will be placed
-            bins = [(x,y)]
-            packer.add_bin(*bins[0]);
-            # Start packing
-            packer.pack()
-            # Obtain number of bins used for packing
-            nbins = len(packer);
-
-            if nbins == 1:
-                if (len(packer[0]) < len(self.dense_layers)): # not all rectanges fit into the bin
-                    return None
-                else:
-                    return packer;
-            else:
-                return None;
-
-        final_packer = None;
-        while True:
-            # try to pack to the current size
-            packer = _pack_rectangles(self, rectangles, xSize, ySize);
-            if packer is not None:
-                final_packer = packer;
-                break;
-
-            # try to enlarge just the xSize
-            packer = _pack_rectangles(self, rectangles, 2 * xSize, ySize);
-            if packer is not None:
-                final_packer = packer;
-                break;
-
-            # try to enlarge just the ySize
-            packer = _pack_rectangles(self, rectangles, xSize, 2 * ySize);
-            if packer is not None:
-                final_packer = packer;
-                break;
-
-            # enlarge both and try again
-            xSize = 2 * xSize;
-            ySize = 2 * ySize;
-
-        # final canvas size for the whole dense data
-        xSize = final_packer.bin_list()[0][0];
-        ySize = final_packer.bin_list()[0][1];
+        # pack data
+        xSize, ySize = _DataPacker.pack_layers_data(self.dense_layers);
 
         # create empty canvas of the size result from the 2D packing
         data = [[0 for col in range(xSize)] for row in range(ySize)]
 
         # write all layers in serial, filling up unused data space in between
         for dense in self.dense_layers:
-            # find coordinates of the rectangle in the packer
-            xCoord, yCoord = (0, 0);
-            for rect in final_packer[0]:
-                if rect.rid == dense.get_layer_index():
-                    xCoord = rect.x;
-                    yCoord = rect.y;
-                    break;
             # write data into the block
-            dense.write_data_binary(data, xCoord, yCoord);
+            dense.write_data_binary(data);
 
         # write data to the file
         dense_data_file = open(self.dense_data_output_path, "wb");  # write bytes, always override previous content
