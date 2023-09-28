@@ -1,10 +1,7 @@
 import argparse
-import datetime
 import os
-import re
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2") # Report only TF errors by default
 
-import numpy as np
 import tensorflow as tf
 
 import ceval
@@ -17,21 +14,11 @@ parser.add_argument("--output_folder", default="../HLSLModels", type=str, help="
 parser.add_argument("--output", default="edge_detector_norm", type=str, help="Model output name")
 #parser.add_argument("--output", default="edge_detector", type=str, help="Model output name")
 parser.add_argument("--lang", default="HLSL", type=str, help="Language output model")
-parser.add_argument("--embedded", default=True, help="Embed network weights into the header. Only small networks can be embedded.")
-
-def test_predict(model : tf.keras.Model):
-    test_val = np.array([0.1, 0.5, 0.75]);
-    test_val = test_val.reshape(1,3);
-    test_val = tf.convert_to_tensor(test_val);
-
-    test_out = model.predict(test_val);
-    print(test_val)
-    print(test_out);
+parser.add_argument("--embedded", default=None, help="Embed network weights into the header. Only small networks can be embedded.")
 
 def main(args: argparse.Namespace):
     # load model
     model = tf.keras.models.load_model(args.model);
-    #test_predict(model); # model testing
 
     # generate model code
     cv = ceval.Ceval(args.output, args.output_folder, args.lang, args.embedded is not None)

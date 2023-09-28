@@ -1,8 +1,6 @@
-import numpy as np
 import tensorflow as tf
 import numpy as np
 import math
-import rectpack
 from rectpack import newPacker
 
 # helper class for writing basic C-style code strings
@@ -46,6 +44,16 @@ class _DataLayer(_Layer):
     # save coordinates of the data for loading and binarization
     def set_data_coordinates(self, xCoord, yCoord):
         self.data_coordinates = (xCoord, yCoord);
+
+    # returns data index into the dense layer data texture
+    def _get_data_index(self, x: str, y: str) -> str:
+        xOffset = "";
+        if self.data_coordinates[0] > 0:
+            xOffset = str(self.data_coordinates[0]) + " + ";
+        yOffset = "";
+        if self.data_coordinates[1] > 0:
+            yOffset = str(self.data_coordinates[1]) + " + ";
+        return "int3(" + xOffset + x + ", " + yOffset + y + ", 0)";
 
     # write output binary data into the prepared coordinates
     def write_data_binary(self, data):
@@ -124,7 +132,7 @@ class _DenseLayer(_DataLayer):
         return self.var + "bias_" + str(self.index);
 
     # return dimensions of the layer
-    def get_dimensions(self) ->(int, int):
+    def _get_dimensions(self) ->(int, int):
         return (len(self.weights[0]), len(self.weights));
 
     # get embedded data for the layer as string
@@ -154,7 +162,7 @@ class _DenseLayer(_DataLayer):
     # write output binary data into the prepared coordinates
     def write_data_binary(self, data):
         xCoord, yCoord = self.data_coordinates
-        xDim, yDim = self.get_dimensions();
+        xDim, yDim = self._get_dimensions();
 
         # write weights
         for y in range(yDim):
@@ -166,22 +174,12 @@ class _DenseLayer(_DataLayer):
 
     # return required 2D memory space for this layer's data
     def get_memory(self):
-        x,y = self.get_dimensions();
+        x,y = self._get_dimensions();
         return (x, y + 1); # y dimension in data will store additional row for bias
 
     # layer index
     def get_layer_index(self):
         return self.index;
-
-    # returns data index into the dense layer data texture
-    def _get_data_index(self, x : str, y : str) -> str:
-        xOffset = "";
-        if self.data_coordinates[0] > 0:
-            xOffset = str(self.data_coordinates[0]) + " + ";
-        yOffset = "";
-        if self.data_coordinates[1] > 0:
-            yOffset = str(self.data_coordinates[1]) + " + ";
-        return "int3(" + xOffset + x + ", " + yOffset  + y + ", 0)";
 
     # input = x,y position in the weight data
     # output = str of the code loading the data into the position
@@ -197,7 +195,7 @@ class _DenseLayer(_DataLayer):
         if self.ceval.embedded:
             return self._get_embedded_bias_name() + "[" + x + "]";
         else:
-            xDim, yDim = self.get_dimensions();
+            xDim, yDim = self._get_dimensions();
             return self.ceval.data_name + ".Load(" + self._get_data_index(x, str(yDim)) + ")";
 
     # input = name of the input variable
@@ -298,33 +296,27 @@ class _BatchNormalization(_DataLayer):
         divisor = _get_norm_data_str(self, self.divisor, self._get_embedded_divisor_name());
         return gamma + _CodeGenerator.new_line + beta + _CodeGenerator.new_line + mean + _CodeGenerator.new_line + divisor + _CodeGenerator.new_line
 
-    # save coordinates of the data for loading and binarization
-    def set_data_coordinates(self, xCoord, yCoord):
-        self.data_coordinates = (xCoord, yCoord);
-
     # write output binary data into the prepared coordinates
     def write_data_binary(self, data):
-        return;
+        xCoord, yCoord = self.data_coordinates
+        size = self._get_size();
+
+        # write gamma, beta, mean and divisor in order of the batch normalization data layer
+        for x in range(size):
+            data[yCoord + 0][xCoord + x] = self.gamma[x];
+            data[yCoord + 1][xCoord + x] = self.beta[x];
+            data[yCoord + 2][xCoord + x] = self.mean[x];
+            data[yCoord + 3][xCoord + x] = self.divisor[x];
 
     # normalization layer has always the same dimension on input as on output
     def _get_size(self):
-        return self.gamma.shape[0];
+        return len(self.gamma);
 
     # return required 2D memory space for this layer's data
     def get_memory(self) -> (int, int):
-        # any shape of gamma, beta, moving_mean or moving_variance is fine
+        # any shape of gamma, beta, mean or divisor is fine
         # as those are define for every input, so they are the same
-        return (self._get_size() + 1, 4); # see memory layout at the beginning of this class
-
-    # returns data index into the dense layer data texture
-    def _get_data_index(self, x : str, y : str) -> str: #!- same as in dense layer??
-        xOffset = "";
-        if self.data_coordinates[0] > 0:
-            xOffset = str(self.data_coordinates[0]) + " + ";
-        yOffset = "";
-        if self.data_coordinates[1] > 0:
-            yOffset = str(self.data_coordinates[1]) + " + ";
-        return "int3(" + xOffset + x + ", " + yOffset  + y + ", 0)";
+        return (self._get_size(), 4); # see memory layout at the beginning of this class
 
     # input = x position in the data, name name of the variable, row index of the row in data layout
     # output = str of the code loading the data into the position
