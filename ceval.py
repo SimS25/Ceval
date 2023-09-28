@@ -27,14 +27,33 @@ class _Layer:
     def __init__(self, ceval):
         self.ceval = ceval;
 
-    # get data for the layer
-    def get_embedded_data_str(self):
-        return "";
-
     # input = name of the input variable
     # output = (function code, name of the output variable)
     def get_code_str(self, input : str, indent : str) -> (str,str):
         return ("",input);
+
+# virtual layer with data class
+class _DataLayer(_Layer):
+    # initializing constructor
+    def __init__(self, ceval):
+        # call layer constructor
+        _Layer.__init__(self, ceval);
+
+    # get embedded data for the layer as string
+    def get_embedded_data_str(self):
+        return "";
+
+    # save coordinates of the data for loading and binarization
+    def set_data_coordinates(self, xCoord, yCoord):
+        self.data_coordinates = (xCoord, yCoord);
+
+    # write output binary data into the prepared coordinates
+    def write_data_binary(self, data):
+        return;
+
+    # return required 2D memory space for this layer's data
+    def get_memory(self) -> (int, int):
+        return (0, 0);
 
 # flatten layer data
 class _FlattenLayer(_Layer):
@@ -68,7 +87,7 @@ class _FlattenLayer(_Layer):
         return (code, output);
 
 # dense layer data
-class _DenseLayer(_Layer):
+class _DenseLayer(_DataLayer):
     ## Dense Layer data format:
     #           X
     #     ____________
@@ -94,10 +113,23 @@ class _DenseLayer(_Layer):
         # prefix name of each variable
         self.var = variable_prefix;
         # call layer constructor
-        _Layer.__init__(self, ceval);
+        _DataLayer.__init__(self, ceval);
 
+    # name of weight variable for embedded data
+    def _get_embedded_weight_name(self):
+        return self.var + "weight_" + str(self.index);
+
+    # name of bias variable for embedded data
+    def _get_embedded_bias_name(self):
+        return self.var + "bias_" + str(self.index);
+
+    # return dimensions of the layer
+    def get_dimensions(self) ->(int, int):
+        return (len(self.weights[0]), len(self.weights));
+
+    # get embedded data for the layer as string
     def get_embedded_data_str(self) -> str:
-        weights_data = "static const float " + self.var + "w"+str(self.index)+"["+str(len(self.weights))+"]"+"["+str(len(self.weights[0]))+"] = " + _CodeGenerator.new_line + "{";
+        weights_data = "static const float " + self._get_embedded_weight_name() + "[" + str(len(self.weights)) + "]" + "[" + str(len(self.weights[0])) + "] = " + _CodeGenerator.new_line + "{";
         for r in range(len(self.weights)):
             row = self.weights[r];
             weights_data = weights_data + "{";
@@ -110,7 +142,7 @@ class _DenseLayer(_Layer):
             if r < len(self.weights) - 1:
                 weights_data = weights_data + "," + _CodeGenerator.new_line;
         weights_data = weights_data + "};" + _CodeGenerator.new_line;
-        biases_data = "static const float " + self.var + "b"+str(self.index)+"["+str(len(self.biases))+"] = " + _CodeGenerator.new_line + "{";
+        biases_data = "static const float " + self._get_embedded_bias_name() + "[" + str(len(self.biases)) + "] = " + _CodeGenerator.new_line + "{";
         for b in range(len(self.biases)):
             bias = self.biases[b];
             biases_data = biases_data + str(bias);
@@ -118,10 +150,6 @@ class _DenseLayer(_Layer):
                 biases_data = biases_data + "," + _CodeGenerator.new_line;
         biases_data = biases_data + "};" + _CodeGenerator.new_line;
         return weights_data + _CodeGenerator.new_line + biases_data + _CodeGenerator.new_line
-
-    # save coordinates of the data for loading and binarization
-    def set_data_coordinates(self, xCoord, yCoord):
-        self.data_coordinates = (xCoord, yCoord);
 
     # write output binary data into the prepared coordinates
     def write_data_binary(self, data):
@@ -136,11 +164,7 @@ class _DenseLayer(_Layer):
         for x in range(xDim):
             data[yCoord + yDim][xCoord + x] = self.biases[x];
 
-    # return dimensions of the layer
-    def get_dimensions(self) ->(int, int):
-        return (len(self.weights[0]), len(self.weights));
-
-    # return required memory space for this dense layer
+    # return required 2D memory space for this layer's data
     def get_memory(self):
         x,y = self.get_dimensions();
         return (x, y + 1); # y dimension in data will store additional row for bias
@@ -163,20 +187,18 @@ class _DenseLayer(_Layer):
     # output = str of the code loading the data into the position
     def _load_weight(self, x : str, y : str) -> str:
         if self.ceval.embedded:
-            weight = self.var + "w" + str(self.index);
-            return weight + "[" + y + "][" + x + "]"; # embedded data are sorted in transpose for better memory access
+            return self._get_embedded_weight_name() + "[" + y + "][" + x + "]"; # embedded data are sorted in transpose for better memory access
         else:
-            return self.ceval.dense_data_name + ".Load(" + self._get_data_index(x, y) + ")";
+            return self.ceval.data_name + ".Load(" + self._get_data_index(x, y) + ")";
 
     # input = x position in the bias data
     # output = str of the code loading the data into the position
     def _load_bias(self, x: str) -> str:
         if self.ceval.embedded:
-            bias = self.var + "b" + str(self.index);
-            return bias + "[" + x + "]";
+            return self._get_embedded_bias_name() + "[" + x + "]";
         else:
             xDim, yDim = self.get_dimensions();
-            return self.ceval.dense_data_name + ".Load(" + self._get_data_index(x, str(yDim)) + ")";
+            return self.ceval.data_name + ".Load(" + self._get_data_index(x, str(yDim)) + ")";
 
     # input = name of the input variable
     # output = (function code, name of the output variable)
@@ -204,6 +226,163 @@ class _DenseLayer(_Layer):
 
         return (code, output);
 
+# batch normalization layer (https://www.tensorflow.org/api_docs/python/tf/keras/layers/BatchNormalization)
+class _BatchNormalization(_DataLayer):
+    ## BatchNormalization Layer data format:
+    #              X            x+1
+    #     ____________________________
+    #     |      gamma      | epsilon |
+    #     |      beta       |         |
+    #     |    moving_mean  |         |
+    #  Y  | moving_variance |         |
+    #     -----------------------------
+    #     X = batch normalization layer INPUT dimension
+    #     Y = always 4, each variable (gamma, beta,...) is a vector with Y dimension = 1
+    #     epsilon = single float common for all variables
+
+    # initializing constructor
+    def __init__(self, ceval, layer, layer_index, variable_prefix):
+        layer_data = layer.get_weights()
+        # index of the flatten layer
+        self.index = layer_index
+        # prefix name of each variable
+        self.var = variable_prefix;
+        # trained normalization variables
+        self.gamma = layer_data[0];
+        self.beta = layer_data[1];
+        self.moving_mean = layer_data[2];
+        self.moving_variance = layer_data[3];
+        self.epsilon = layer.epsilon;
+
+        # gamma * (batch - self.moving_mean) / sqrt(self.moving_var+epsilon) + beta
+        print("BatchNormalization\n");
+        print(str(self.gamma));
+        print(str(self.beta));
+        print(str(self.moving_mean));
+        print(str(self.moving_variance));
+        print(str(self.epsilon));
+        print("\n\n");
+
+        # save data and override _DataLayer functions!!
+        # call layer constructor
+        _Layer.__init__(self, ceval);
+
+    # name of gamma variable for embedded data
+    def _get_embedded_gamma_name(self):
+        return self.var + "gamma_" + str(self.index);
+
+    # name of beta variable for embedded data
+    def _get_embedded_beta_name(self):
+        return self.var + "beta_" + str(self.index);
+
+    # name of beta variable for embedded data
+    def _get_embedded_mean_name(self):
+        return self.var + "mean_" + str(self.index);
+
+    # name of beta variable for embedded data
+    def _get_embedded_variance_name(self):
+        return self.var + "variance_" + str(self.index);
+
+    # name of beta variable for embedded data
+    def _get_embedded_epsilon_name(self):
+        return self.var + "epsilon_" + str(self.index);
+
+    # get embedded data for the layer as string
+    def get_embedded_data_str(self):
+        # helper function creating norm data for a given variable
+        def _get_norm_data_str(self, data, name) -> str:
+            data_size = len(data);
+            norm_data = "static const float " + name + "[" + str(data_size) + "] = " + _CodeGenerator.new_line + "{";
+            for d in range(data_size):
+                value = data[d];
+                norm_data = norm_data + str(value);
+                if d < data_size - 1:
+                    norm_data = norm_data + "," + _CodeGenerator.new_line;
+            norm_data = norm_data + "};" + _CodeGenerator.new_line;
+            return norm_data;
+
+        gamma = _get_norm_data_str(self, self.gamma, self._get_embedded_gamma_name());
+        beta = _get_norm_data_str(self, self.beta, self._get_embedded_beta_name());
+        mean = _get_norm_data_str(self, self.moving_mean, self._get_embedded_mean_name());
+        variance = _get_norm_data_str(self, self.moving_variance, self._get_embedded_variance_name());
+        epsilon = "static const float " + self._get_embedded_epsilon_name() + " = " + str(self.epsilon) + ";" + _CodeGenerator.new_line;
+        return gamma + _CodeGenerator.new_line + beta + _CodeGenerator.new_line + mean + _CodeGenerator.new_line + variance + _CodeGenerator.new_line + epsilon + _CodeGenerator.new_line
+
+    # save coordinates of the data for loading and binarization
+    def set_data_coordinates(self, xCoord, yCoord):
+        self.data_coordinates = (xCoord, yCoord);
+
+    # write output binary data into the prepared coordinates
+    def write_data_binary(self, data):
+        return;
+
+    # normalization layer has always the same dimension on input as on output
+    def _get_size(self):
+        return self.gamma.shape[0];
+
+    # return required 2D memory space for this layer's data
+    def get_memory(self) -> (int, int):
+        # any shape of gamma, beta, moving_mean or moving_variance is fine
+        # as those are define for every input, so they are the same
+        return (self._get_size() + 1, 4); # see memory layout at the beginning of this class
+
+    # returns data index into the dense layer data texture
+    def _get_data_index(self, x : str, y : str) -> str: #!- same as in dense layer??
+        xOffset = "";
+        if self.data_coordinates[0] > 0:
+            xOffset = str(self.data_coordinates[0]) + " + ";
+        yOffset = "";
+        if self.data_coordinates[1] > 0:
+            yOffset = str(self.data_coordinates[1]) + " + ";
+        return "int3(" + xOffset + x + ", " + yOffset  + y + ", 0)";
+
+    # input = x position in the data, name name of the variable, row index of the row in data layout
+    # output = str of the code loading the data into the position
+    def _load_data(self, x: str, name : str, row : int):
+        if self.ceval.embedded:
+            return name + "[" + x + "]";
+        else:
+            return self.ceval.data_name + ".Load(" + self._get_data_index(x, str(row)) + ")";
+
+    # input = x position in the data
+    # output = str of the code loading the data into the position
+    def _load_gamma(self, x: str) -> str:
+        return self._load_data(x, self._get_embedded_gamma_name(), 0);
+    # input = x position in the data
+    # output = str of the code loading the data into the position
+    def _load_beta(self, x: str) -> str:
+        return self._load_data(x, self._get_embedded_beta_name(), 1);
+    # input = x position in the data
+    # output = str of the code loading the data into the position
+    def _load_mean(self, x: str) -> str:
+        return self._load_data(x, self._get_embedded_mean_name(), 2);
+    # input = x position in the data
+    # output = str of the code loading the data into the position
+    def _load_variance(self, x: str) -> str:
+        return self._load_data(x, self._get_embedded_variance_name(), 3);
+
+    # output = str of the code loading the data into the position
+    def _load_epsilon(self) -> str:
+        if self.ceval.embedded:
+            return self._get_embedded_epsilon_name();
+        else:
+            return self.ceval.data_name + ".Load(" + self._get_data_index(self._get_size(), str(0)) + ")"; # epsilon is behind the first row
+
+    # input = name of the input variable
+    # output = (function code, name of the output variable)
+    def get_code_str(self, input : str, indent : str) -> (str,str):
+        length = len(self.gamma);
+
+        # normalization has the same input and output dimensions, so we can do it inplace without creating new variables
+        code = indent + "// batch normalization layer " + str(self.index) + _CodeGenerator.new_line;
+
+        # using formula: gamma * (batch - self.moving_mean) / sqrt(self.moving_var+epsilon) + beta
+        #!- we can combine variance and epsilon before execution!!
+        normalization_code = input + "[i] = " + self._load_gamma("i") + " * (" + input + "[i] - " + self._load_mean("i") + ") / sqrt(" + self._load_variance("i") + " + " + self._load_epsilon() + ") + " + self._load_beta("i") + ";";
+        code = code + _CodeGenerator.for_loop("int i = 0; i < " + str(length) + "; i++", normalization_code, indent, indent) + _CodeGenerator.new_line + _CodeGenerator.new_line;
+
+        return (code, input);
+
 # helper class for packing layer data
 class _DataPacker:
     # pack rectangles into the canvas, returns None if canvas is too small
@@ -230,18 +409,18 @@ class _DataPacker:
             return None;
 
     # dense layer comparator to sort layers from the largest to the smallest
-    def _denseComparator(d):
+    def _comparator(d):
         x, y = d.get_memory();
         return x * y;
 
     # pack layers by preparing their data index into common data canvas
     # data canvas resolution is returned on the output
-    def pack_layers_data(dense_layers) ->(int, int):
+    def pack_layers_data(data_layers) ->(int, int):
         # sort layers by their dense layer size
-        dense_layers.sort(reverse=True, key=_DataPacker._denseComparator);
+        data_layers.sort(reverse=True, key=_DataPacker._comparator);
 
         # start with the dimensions of the largest layer
-        xSize, ySize = dense_layers[0].get_memory();
+        xSize, ySize = data_layers[0].get_memory();
 
         # ceil them up to power of two
         powerX = math.log(xSize) / math.log(2.0);
@@ -251,26 +430,27 @@ class _DataPacker:
 
         # now try to fit blocks into the space, and increase size otherwise
         rectangles = [];
-        for dense in dense_layers:
-            x, y = dense.get_memory();
-            rectangles.append((x, y, dense.get_layer_index()));
+        for i in range(len(data_layers)):
+            layer = data_layers[i];
+            x, y = layer.get_memory();
+            rectangles.append((x, y, i));
 
         final_packer = None;
         while True:
             # try to pack to the current size
-            packer = _DataPacker._pack_rectangles(rectangles, xSize, ySize, len(dense_layers));
+            packer = _DataPacker._pack_rectangles(rectangles, xSize, ySize, len(data_layers));
             if packer is not None:
                 final_packer = packer;
                 break;
 
             # try to enlarge just the xSize
-            packer = _DataPacker._pack_rectangles(rectangles, 2 * xSize, ySize, len(dense_layers));
+            packer = _DataPacker._pack_rectangles(rectangles, 2 * xSize, ySize, len(data_layers));
             if packer is not None:
                 final_packer = packer;
                 break;
 
             # try to enlarge just the ySize
-            packer = _DataPacker._pack_rectangles(rectangles, xSize, 2 * ySize, len(dense_layers));
+            packer = _DataPacker._pack_rectangles(rectangles, xSize, 2 * ySize, len(data_layers));
             if packer is not None:
                 final_packer = packer;
                 break;
@@ -280,15 +460,16 @@ class _DataPacker:
             ySize = 2 * ySize;
 
         # propagate data coordinates to the dense layers
-        for dense in dense_layers:
+        for i in range(len(data_layers)):
+            layer = data_layers[i];
             # find coordinates of the rectangle in the packer
             xCoord, yCoord = (0, 0);
             for rect in final_packer[0]:
-                if rect.rid == dense.get_layer_index():
+                if rect.rid == i:
                     xCoord = rect.x;
                     yCoord = rect.y;
                     break;
-            dense.set_data_coordinates(xCoord, yCoord);
+            layer.set_data_coordinates(xCoord, yCoord);
 
         # final canvas size for the whole dense data
         xSize = final_packer.bin_list()[0][0];
@@ -340,13 +521,14 @@ class Ceval:
         config = model.get_config();
         flatten_index = 0;
         dense_index = 0;
+        batch_norm_index = 0;
         for l in range(len(model.layers)):
             layer = model.layers[l];
             layer_class = config["layers"][l + 1]["class_name"]
             if layer_class == "Dense":
                 activation = config["layers"][l + 1]["config"].get("activation")
                 self.layers.append(_DenseLayer(self, layer, dense_index, variable_prefix, activation));
-                self.dense_layers.append(self.layers[-1]); # save dense layer for further data processing
+                self.data_layers.append(self.layers[-1]); # save dense layer for further data processing
                 dense_index = dense_index + 1;
             elif layer_class == "Flatten":
                 if config["layers"][l]["class_name"] == "InputLayer":
@@ -355,49 +537,53 @@ class Ceval:
                     flatten_index = flatten_index + 1;
                 else:
                     print("Flatten on non-InputLayer not supported");
+            elif layer_class == "BatchNormalization":
+                self.layers.append(_BatchNormalization(self, layer, batch_norm_index, variable_prefix));
+                self.data_layers.append(self.layers[-1]);  # save dense layer for further data processing
+                batch_norm_index = batch_norm_index + 1;
             elif layer_class == "Dropout":
                 continue
 
     # generate data embedded into the header file
     def __generate_embedded_data(self, file):
-        for layer in self.layers:
+        for layer in self.data_layers:
             # write data of the layer
             file.write(layer.get_embedded_data_str());
 
-    # generate binary data for the dense layers of the network
+    # generate binary data for the layers
     # returns dimension of the texture
-    def __generate_binary_dense_data(self) ->(int, int):
+    def __generate_binary_data(self) ->(int, int):
         # pack data
-        xSize, ySize = _DataPacker.pack_layers_data(self.dense_layers);
+        xSize, ySize = _DataPacker.pack_layers_data(self.data_layers);
 
         # create empty canvas of the size result from the 2D packing
         data = [[0 for col in range(xSize)] for row in range(ySize)]
 
         # write all layers in serial, filling up unused data space in between
-        for dense in self.dense_layers:
+        for layer in self.data_layers:
             # write data into the block
-            dense.write_data_binary(data);
+            layer.write_data_binary(data);
 
         # write data to the file
-        dense_data_file = open(self.dense_data_output_path, "wb");  # write bytes, always override previous content
+        data_file = open(self.data_output_path, "wb");  # write bytes, always override previous content
         np_float_data = np.array(data, 'float32');
-        np_float_data.tofile(dense_data_file);
-        dense_data_file.close();
+        np_float_data.tofile(data_file);
+        data_file.close();
 
         return (xSize, ySize);
 
     # generate data of the network
     def __generate_data(self, file):
         # generate the binary data into separate files
-        xDense, yDense = self.__generate_binary_dense_data();
+        xDense, yDense = self.__generate_binary_data();
 
         # prepare texture bind spots for user
         data_bind_definition = "// #TODO:" + _CodeGenerator.new_line;
         data_bind_definition = data_bind_definition + "//      1. Assign binding slots for the network data" + _CodeGenerator.new_line;
         data_bind_definition = data_bind_definition + "//      2. Load textures with their dimensions and bind them to their slots:" + _CodeGenerator.new_line;
-        data_bind_definition = data_bind_definition + "//              a. Load " + self.dense_data_name + " as Texture2D with dimensions [" + str(xDense) + "][" + str(yDense) + "] and format float32" + _CodeGenerator.new_line;
+        data_bind_definition = data_bind_definition + "//              a. Load " + self.data_name + " as Texture2D with dimensions [" + str(xDense) + "][" + str(yDense) + "] and format float32" + _CodeGenerator.new_line;
         data_bind_definition = data_bind_definition + "//      3. Call function " + self.function_name + " to predict." + _CodeGenerator.new_line;
-        data_bind_definition = data_bind_definition + "Texture2D<float> " + self.dense_data_name + " : register(t" + "100" + ");" + _CodeGenerator.new_line;
+        data_bind_definition = data_bind_definition + "Texture2D<float> " + self.data_name + " : register(t" + "100" + ");" + _CodeGenerator.new_line;
         file.write(data_bind_definition + _CodeGenerator.new_line);
 
     # initializing constructor
@@ -411,16 +597,16 @@ class Ceval:
         self.output_path = output_folder + "/" + output + suffix;
         # function name
         self.function_name = output;
-        # dense layers structure name
-        self.dense_data_name = self.function_name + "_dense_data";
-        # dense data file output
-        self.dense_data_output_path = output_folder + "/" + self.dense_data_name;
+        # layers structure name
+        self.data_name = self.function_name + "_data";
+        # data file output
+        self.data_output_path = output_folder + "/" + self.data_name;
         # macro header
         self.macro_header = "__" + output.upper() + "__"
         # list for all hidden layers
         self.layers = [];
         # list for Dense layers
-        self.dense_layers = [];
+        self.data_layers = [];
         # generate data as embedded into the header
         self.embedded = embedded;
 

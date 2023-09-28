@@ -11,12 +11,13 @@ import ceval
 
 # network arguments
 parser = argparse.ArgumentParser()
-#parser.add_argument("--model", default="../TFModels/recolor_relu_2xH8", type=str, help="TF model input")
-parser.add_argument("--model", default="../TFModels/edge_detector_relu_2xH32", type=str, help="TF model input")
+parser.add_argument("--model", default="../TFModels/edge_detector_relu_2xH16", type=str, help="TF model input")
+#parser.add_argument("--model", default="../TFModels/edge_detector_relu_2xH32", type=str, help="TF model input")
 parser.add_argument("--output_folder", default="../HLSLModels", type=str, help="Output folder")
-parser.add_argument("--output", default="edge_detector", type=str, help="Model output name")
+parser.add_argument("--output", default="edge_detector_norm", type=str, help="Model output name")
+#parser.add_argument("--output", default="edge_detector", type=str, help="Model output name")
 parser.add_argument("--lang", default="HLSL", type=str, help="Language output model")
-parser.add_argument("--embedded", default=None, help="Embed network weights into the header. Only small networks can be embedded.")
+parser.add_argument("--embedded", default=True, help="Embed network weights into the header. Only small networks can be embedded.")
 
 def test_predict(model : tf.keras.Model):
     test_val = np.array([0.1, 0.5, 0.75]);
