@@ -86,11 +86,17 @@ class _FlattenLayer(_Layer):
         code = indent + "// flatten layer " + str(self.index) + _CodeGenerator.new_line;
         code = code + indent + "float " + output + "[" + str(output_len) + "];" + _CodeGenerator.new_line;
 
-        # support only for 2D inputs for the flatten
-        if len(self._input_shape) == 2:
-            # loop over weights
+        # 2D inputs for the flatten
+        input_dimension = len(self._input_shape);
+        if input_dimension == 2:
             inner_loop = _CodeGenerator.for_loop("int j = 0; j < " + str(self._input_shape[1]) + "; j++", output + "[i * " + str(self._input_shape[0]) + " + j] = " + input + "[i][j];", "", indent);
             code = code + _CodeGenerator.for_loop("int i = 0; i < " + str(self._input_shape[0]) + "; i++", inner_loop, indent, indent) + _CodeGenerator.new_line + _CodeGenerator.new_line;
+        elif input_dimension == 3:
+            inner_inner_loop = _CodeGenerator.for_loop("int m = 0; m < " + str(self._input_shape[2]) + "; m++", output + "[i * " + str(self._input_shape[0]) + " + j * " + str(self._input_shape[1]) + " + m] = " + input + "[i][j][m];", "", indent);
+            inner_loop = _CodeGenerator.for_loop("int j = 0; j < " + str(self._input_shape[1]) + "; j++", inner_inner_loop, "", indent);
+            code = code + _CodeGenerator.for_loop("int i = 0; i < " + str(self._input_shape[0]) + "; i++", inner_loop, indent, indent) + _CodeGenerator.new_line + _CodeGenerator.new_line;
+        else:
+            print("Input dimension for Flatten layer not supported: " + str(input_dimension));
 
         return (code, output);
 
