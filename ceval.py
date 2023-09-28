@@ -129,7 +129,7 @@ class _DenseLayer(_DataLayer):
 
     # get embedded data for the layer as string
     def get_embedded_data_str(self) -> str:
-        weights_data = "static const float " + self._get_embedded_weight_name() + "[" + str(len(self.weights)) + "]" + "[" + str(len(self.weights[0])) + "] = " + _CodeGenerator.new_line + "{";
+        weights_data = "static const float " + self._get_embedded_weight_name() + "[" + str(len(self.weights)) + "]" + "[" + str(len(self.weights[0])) + "] =" + _CodeGenerator.new_line + "{";
         for r in range(len(self.weights)):
             row = self.weights[r];
             weights_data = weights_data + "{";
@@ -142,7 +142,7 @@ class _DenseLayer(_DataLayer):
             if r < len(self.weights) - 1:
                 weights_data = weights_data + "," + _CodeGenerator.new_line;
         weights_data = weights_data + "};" + _CodeGenerator.new_line;
-        biases_data = "static const float " + self._get_embedded_bias_name() + "[" + str(len(self.biases)) + "] = " + _CodeGenerator.new_line + "{";
+        biases_data = "static const float " + self._get_embedded_bias_name() + "[" + str(len(self.biases)) + "] =" + _CodeGenerator.new_line + "{";
         for b in range(len(self.biases)):
             bias = self.biases[b];
             biases_data = biases_data + str(bias);
@@ -229,16 +229,17 @@ class _DenseLayer(_DataLayer):
 # batch normalization layer (https://www.tensorflow.org/api_docs/python/tf/keras/layers/BatchNormalization)
 class _BatchNormalization(_DataLayer):
     ## BatchNormalization Layer data format:
-    #              X            x+1
-    #     ____________________________
-    #     |      gamma      | epsilon |
-    #     |      beta       |         |
-    #     |    moving_mean  |         |
-    #  Y  | moving_variance |         |
+    #            X
+    #     _____________
+    #     |    gamma   |
+    #  Y  |    beta    |
+    #     |    mean    |
+    #     |   divisor  |
     #     -----------------------------
     #     X = batch normalization layer INPUT dimension
     #     Y = always 4, each variable (gamma, beta,...) is a vector with Y dimension = 1
-    #     epsilon = single float common for all variables
+    #     divisor = 1.0f / sqrt(moving_variance + epsilon) is precomputed divisor for the inference function:
+    #           output = gamma * (input - moving_mean) / sqrt(moving_var + epsilon) + beta
 
     # initializing constructor
     def __init__(self, ceval, layer, layer_index, variable_prefix):
@@ -250,20 +251,14 @@ class _BatchNormalization(_DataLayer):
         # trained normalization variables
         self.gamma = layer_data[0];
         self.beta = layer_data[1];
-        self.moving_mean = layer_data[2];
-        self.moving_variance = layer_data[3];
-        self.epsilon = layer.epsilon;
+        self.mean = layer_data[2];
 
-        # gamma * (batch - self.moving_mean) / sqrt(self.moving_var+epsilon) + beta
-        print("BatchNormalization\n");
-        print(str(self.gamma));
-        print(str(self.beta));
-        print(str(self.moving_mean));
-        print(str(self.moving_variance));
-        print(str(self.epsilon));
-        print("\n\n");
+        # compute divisor as labeled in data format description
+        variance = layer_data[3];
+        self.divisor = [0] * len(self.gamma);
+        for i in range(len(self.gamma)):
+            self.divisor[i] = 1.0 / math.sqrt(variance[i] + layer.epsilon);
 
-        # save data and override _DataLayer functions!!
         # call layer constructor
         _Layer.__init__(self, ceval);
 
@@ -280,19 +275,15 @@ class _BatchNormalization(_DataLayer):
         return self.var + "mean_" + str(self.index);
 
     # name of beta variable for embedded data
-    def _get_embedded_variance_name(self):
-        return self.var + "variance_" + str(self.index);
-
-    # name of beta variable for embedded data
-    def _get_embedded_epsilon_name(self):
-        return self.var + "epsilon_" + str(self.index);
+    def _get_embedded_divisor_name(self):
+        return self.var + "div_" + str(self.index);
 
     # get embedded data for the layer as string
     def get_embedded_data_str(self):
         # helper function creating norm data for a given variable
         def _get_norm_data_str(self, data, name) -> str:
             data_size = len(data);
-            norm_data = "static const float " + name + "[" + str(data_size) + "] = " + _CodeGenerator.new_line + "{";
+            norm_data = "static const float " + name + "[" + str(data_size) + "] =" + _CodeGenerator.new_line + "{";
             for d in range(data_size):
                 value = data[d];
                 norm_data = norm_data + str(value);
@@ -303,10 +294,9 @@ class _BatchNormalization(_DataLayer):
 
         gamma = _get_norm_data_str(self, self.gamma, self._get_embedded_gamma_name());
         beta = _get_norm_data_str(self, self.beta, self._get_embedded_beta_name());
-        mean = _get_norm_data_str(self, self.moving_mean, self._get_embedded_mean_name());
-        variance = _get_norm_data_str(self, self.moving_variance, self._get_embedded_variance_name());
-        epsilon = "static const float " + self._get_embedded_epsilon_name() + " = " + str(self.epsilon) + ";" + _CodeGenerator.new_line;
-        return gamma + _CodeGenerator.new_line + beta + _CodeGenerator.new_line + mean + _CodeGenerator.new_line + variance + _CodeGenerator.new_line + epsilon + _CodeGenerator.new_line
+        mean = _get_norm_data_str(self, self.mean, self._get_embedded_mean_name());
+        divisor = _get_norm_data_str(self, self.divisor, self._get_embedded_divisor_name());
+        return gamma + _CodeGenerator.new_line + beta + _CodeGenerator.new_line + mean + _CodeGenerator.new_line + divisor + _CodeGenerator.new_line
 
     # save coordinates of the data for loading and binarization
     def set_data_coordinates(self, xCoord, yCoord):
@@ -358,15 +348,8 @@ class _BatchNormalization(_DataLayer):
         return self._load_data(x, self._get_embedded_mean_name(), 2);
     # input = x position in the data
     # output = str of the code loading the data into the position
-    def _load_variance(self, x: str) -> str:
-        return self._load_data(x, self._get_embedded_variance_name(), 3);
-
-    # output = str of the code loading the data into the position
-    def _load_epsilon(self) -> str:
-        if self.ceval.embedded:
-            return self._get_embedded_epsilon_name();
-        else:
-            return self.ceval.data_name + ".Load(" + self._get_data_index(self._get_size(), str(0)) + ")"; # epsilon is behind the first row
+    def _load_divisor(self, x: str) -> str:
+        return self._load_data(x, self._get_embedded_divisor_name(), 3);
 
     # input = name of the input variable
     # output = (function code, name of the output variable)
@@ -376,9 +359,8 @@ class _BatchNormalization(_DataLayer):
         # normalization has the same input and output dimensions, so we can do it inplace without creating new variables
         code = indent + "// batch normalization layer " + str(self.index) + _CodeGenerator.new_line;
 
-        # using formula: gamma * (batch - self.moving_mean) / sqrt(self.moving_var+epsilon) + beta
-        #!- we can combine variance and epsilon before execution!!
-        normalization_code = input + "[i] = " + self._load_gamma("i") + " * (" + input + "[i] - " + self._load_mean("i") + ") / sqrt(" + self._load_variance("i") + " + " + self._load_epsilon() + ") + " + self._load_beta("i") + ";";
+        # using formula: gamma * (batch - moving_mean) / sqrt(moving_var + epsilon) + beta
+        normalization_code = input + "[i] = " + self._load_gamma("i") + " * (" + input + "[i] - " + self._load_mean("i") + ") * " + self._load_divisor("i") + " + " + self._load_beta("i") + ";";
         code = code + _CodeGenerator.for_loop("int i = 0; i < " + str(length) + "; i++", normalization_code, indent, indent) + _CodeGenerator.new_line + _CodeGenerator.new_line;
 
         return (code, input);
