@@ -517,6 +517,8 @@ class Ceval:
                 batch_norm_index = batch_norm_index + 1;
             elif layer_class == "Dropout":
                 continue
+            else:
+                print("Error: Unsupported layer type: " + layer_class);
 
     # generate data embedded into the header file
     def __generate_embedded_data(self, file):
